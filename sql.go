@@ -397,6 +397,21 @@ type finalCloser interface {
 	finalClose() error
 }
 
+// Return the Connection passed by driver provider
+func (db *DB) DriverConn() (driver.Conn, func(error), error) {
+	dc, err := db.conn(cachedOrNewConn)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Ownership pass to caller, should call releaseConn after using
+	// to return connection to the db's free pool only when err is nil
+	// err is optionally the last error that occurred on this connection
+	releaseConn := func(e error) {
+		db.putConn(dc, e)
+	}
+	return dc.ci, releaseConn, nil
+}
+
 // addDep notes that x now depends on dep, and x's finalClose won't be
 // called until all of x's dependencies are removed with removeDep.
 func (db *DB) addDep(x finalCloser, dep interface{}) {
