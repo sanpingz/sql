@@ -412,6 +412,61 @@ func (db *DB) DriverConn() (driver.Conn, func(error), error) {
 	return dc.ci, releaseConn, nil
 }
 
+// Exec executes a query with specified connection.
+// The args are for any placeholder parameters in the query.
+func (db *DB) ExecConn(ci driver.Conn, query string, args ...interface{}) (Result, error) {
+	var res Result
+	var err error
+	for i := 0; i < maxBadConnRetries; i++ {
+		res, err = db.execConn(ci, query, args)
+		if err != driver.ErrBadConn {
+			break
+		}
+	}
+	return res, err
+}
+
+func (db *DB) execConn(ci driver.Conn, query string, args []interface{}) (res Result, err error) {
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return driverResult{}, errDBClosed
+	}
+	dc := &driverConn{
+		db:        db,
+		createdAt: nowFunc(),
+		ci:        ci,
+	}
+	db.addDepLocked(dc, dc)
+	dc.inUse = true
+	db.mu.Unlock()
+
+	if execer, ok := dc.ci.(driver.Execer); ok {
+		dargs, err := driverArgs(nil, args)
+		if err != nil {
+			return nil, err
+		}
+		dc.Lock()
+		resi, err := execer.Exec(query, dargs)
+		dc.Unlock()
+		if err != driver.ErrSkip {
+			if err != nil {
+				return nil, err
+			}
+			return driverResult{dc, resi}, nil
+		}
+	}
+
+	dc.Lock()
+	si, err := dc.ci.Prepare(query)
+	dc.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	defer withLock(dc, func() { si.Close() })
+	return resultFromStatement(driverStmt{dc, si}, args...)
+}
+
 // addDep notes that x now depends on dep, and x's finalClose won't be
 // called until all of x's dependencies are removed with removeDep.
 func (db *DB) addDep(x finalCloser, dep interface{}) {
